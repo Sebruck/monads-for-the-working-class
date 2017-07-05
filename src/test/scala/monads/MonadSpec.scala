@@ -4,9 +4,10 @@ import monads.YourFunctors.Functor
 import monads.YourMonads.Monad
 import org.scalatest.{AsyncWordSpecLike, Matchers}
 
-import scala.concurrent.{ExecutionContext, Future}
+import scala.annotation.tailrec
+import scala.concurrent.{ExecutionContext, Future, Promise}
 import scala.concurrent.ExecutionContext.global
-import scala.util.Try
+import scala.util.{Failure, Success, Try}
 
 class MonadSpec extends AsyncWordSpecLike with Matchers {
 
@@ -15,7 +16,7 @@ class MonadSpec extends AsyncWordSpecLike with Matchers {
 
   "You" should {
     // easy, look at the slides if you need guidance :)
-    "create a Monad for Option" ignore {
+    "create a Monad for Option" in {
       import YourMonads.optionMonad
 
       def stringToInt(s: String): Option[Int] =
@@ -31,7 +32,7 @@ class MonadSpec extends AsyncWordSpecLike with Matchers {
     }
 
     // easy
-    "create a Monad for Lists - wow how creative" ignore {
+    "create a Monad for Lists - wow how creative" in {
       import YourMonads.listMonad
 
       def duplicate[A](a: A): List[A] = List(a, a)
@@ -43,7 +44,7 @@ class MonadSpec extends AsyncWordSpecLike with Matchers {
     }
 
     // medium
-    "create a Monad for Future - now it gets difficult" ignore {
+    "create a Monad for Future - now it gets difficult" in {
       import YourMonads.futureMonad
 
       def getName(userId: Int): Future[String] = Future.successful("Bob")
@@ -58,7 +59,7 @@ class MonadSpec extends AsyncWordSpecLike with Matchers {
     }
 
     // advanced
-    "create a FutureOption Transformer - wow two monads create a new monad" ignore {
+    "create a FutureOption Transformer - wow two monads create a new monad" in {
       import YourMonads.optionMonad
       import YourMonads.futureMonad
       import Transformer.FutureOption
@@ -89,10 +90,10 @@ object YourMonads {
 
     // todo: make you life easier, implement map here once and for all!
     // tip: you can do it by just using pure and flatMap
-    // def map[A, B](fa: M[A])(f: (A) => B): M[B] = ???
+     def map[A, B](fa: M[A])(f: (A) => B): M[B] = flatMap(fa, (a: A) => pure(f(a)))
 
     // todo: implement flatten in terms of flatMap or implement flatMap interms of flatten and map
-//    def flatten[A](fa: M[M[A]]): M[A]
+     def flatten[A](fa: M[M[A]]): M[A] = flatMap[M[A], A](fa, identity)
   }
 
   // helper for using M(A).yourFlatMap..
@@ -101,21 +102,71 @@ object YourMonads {
   }
 
   // todo: challenge yourself - please do not use the `flatMap` or `map` from standard library
-  implicit def optionMonad: Monad[Option] = ???
+  implicit def optionMonad: Monad[Option] =  new Monad[Option] {
+    override def pure[A](fa: A): Option[A] = Option(fa)
 
-  implicit def listMonad: Monad[List] = ???
+    override def flatMap[A, B](fa: Option[A], f: (A) => Option[B]): Option[B] =
+      fa match {
+        case Some(a) => f(a)
+        case None => None
+      }
+  }
+
+  implicit def listMonad: Monad[List] = new Monad[List] {
+    override def pure[A](fa: A): List[A] = List(fa)
+
+    override def flatMap[A, B](fa: List[A], f: (A) => List[B]): List[B] = {
+      @tailrec
+      def loop(current: List[A], acc: List[B]): List[B] = {
+        current match {
+          case Nil => acc
+          case head :: rest => loop(rest, acc ++ f(head))
+        }
+      }
+
+      loop(fa, Nil)
+    }
+  }
 
   // you might need Promise
-  implicit def futureMonad(implicit ec: ExecutionContext): Monad[Future] = ???
+  implicit def futureMonad(implicit ec: ExecutionContext): Monad[Future] = new Monad[Future] {
+
+    override def pure[A](fa: A): Future[A] = Future.successful(fa)
+
+    override def flatMap[A, B](fa: Future[A], f: (A) => Future[B]): Future[B] = {
+      val p = Promise[B]()
+
+      fa.onComplete {
+        case Success(s) => p.completeWith(f(s))
+        case Failure(fail) => p.failure(fail)
+      }
+
+      p.future
+    }
+  }
 
 }
 object Transformer {
 
   case class FutureOption[A](
       value: Future[Option[A]])(implicit ec: ExecutionContext, optMon: Monad[Option], futMonad: Monad[Future]) {
-    def pure(fa: A): FutureOption[A]                         = ???
-    def flatMap[B](f: A => FutureOption[B]): FutureOption[B] = ???
-    def map[B](f: A => B): FutureOption[B]                   = ???
+
+    def flatMap[B](f: A => FutureOption[B]): FutureOption[B] = FutureOption {
+      futMonad.flatMap(value, { opt: Option[A] =>
+        optMon
+          .map(opt)(f)
+          .getOrElse(FutureOption(futMonad.pure(None)))
+          .value
+      })
+    }
+
+    def map[B](f: A => B): FutureOption[B] =
+      flatMap((a: A) => FutureOption.pure(f(a)))
   }
 
+  object FutureOption {
+    def pure[A](fa: A)
+               (implicit ec: ExecutionContext, optMon: Monad[Option], futMonad: Monad[Future]): FutureOption[A] =
+      FutureOption(futMonad.pure(optMon.pure(fa)))
+  }
 }
